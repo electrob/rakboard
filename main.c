@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2014 - 2019, Nordic Semiconductor ASA
+ * Copyright (c) 2016 - 2019, Nordic Semiconductor ASA
  *
  * All rights reserved.
  *
@@ -37,120 +37,140 @@
  * OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  *
  */
+#include <stdint.h>
+#include <stdbool.h>
+#include <stddef.h>
+
+#include "nrf.h"
+#include "nrf_drv_clock.h"
+#include "nrf_gpio.h"
+#include "nrf_delay.h"
+#include "nrf_log.h"
+#include "nrf_log_ctrl.h"
+#include "nrf_drv_power.h"
+#include "nrf_serial.h"
+#include "app_timer.h"
+
+
+#include "app_error.h"
+#include "app_util.h"
+#include "boards.h"
+
 /** @file
- * @defgroup uart_example_main main.c
+ * @defgroup nrf_serial_example main.c
  * @{
- * @ingroup uart_example
- * @brief UART Example Application main file.
- *
- * This file contains the source code for a sample application using UART.
+ * @ingroup nrf_serial_example
+ * @brief Example of @ref nrf_serial usage. Simple loopback.
  *
  */
 
-#include <stdbool.h>
-#include <stdint.h>
-#include <stdio.h>
-#include "app_uart.h"
-#include "app_error.h"
-#include "nrf_delay.h"
-#include "nrf.h"
-#include "bsp.h"
-#if defined (UART_PRESENT)
-#include "nrf_uart.h"
-#endif
-#if defined (UARTE_PRESENT)
-#include "nrf_uarte.h"
-#endif
-
-
-//#define ENABLE_LOOPBACK_TEST  /**< if defined, then this example will be a loopback test, which means that TX should be connected to RX to get data loopback. */
-
-#define MAX_TEST_DATA_BYTES     (15U)                /**< max number of test bytes to be used for tx and rx. */
-#define UART_TX_BUF_SIZE 32                         /**< UART TX buffer size. */
-#define UART_RX_BUF_SIZE 1                         /**< UART RX buffer size. */
+#define OP_QUEUES_SIZE          3
+#define APP_TIMER_PRESCALER     NRF_SERIAL_APP_TIMER_PRESCALER
 
 #define GPRS_POWER_ON 6
 #define GPRS_TXD 12
 #define GPRS_RXD 20
 #define GPRS_RESET 14
-//#define GPRS_PWRKEY 15
 
-uint8_t recvBytes[20] = {0};
-uint8_t recvCnt = 0;
-
-void uart_error_handle(app_uart_evt_t * p_event)
+static void sleep_handler(void)
 {
-    uint8_t rxChar = 0;
-    
-    if (p_event->evt_type == APP_UART_COMMUNICATION_ERROR)
-    {
-        APP_ERROR_HANDLER(p_event->data.error_communication);
-    }
-    else if (p_event->evt_type == APP_UART_FIFO_ERROR)
-    {
-        APP_ERROR_HANDLER(p_event->data.error_code);
-    } else if(p_event->evt_type == APP_UART_DATA_READY) 
-    {
-        app_uart_get(&rxChar);
-        recvBytes[recvCnt] = rxChar;
-        recvCnt++;
-    }
+    __WFE();
+    __SEV();
+    __WFE();
 }
 
-/**
- * @brief Function for main application entry.
- */
+NRF_SERIAL_DRV_UART_CONFIG_DEF(m_uart0_drv_config,
+                      GPRS_TXD, GPRS_RXD,
+                      0, 0,
+                      NRF_UART_HWFC_DISABLED, NRF_UART_PARITY_EXCLUDED,
+                      NRF_UART_BAUDRATE_9600,
+                      UART_DEFAULT_CONFIG_IRQ_PRIORITY);
+
+#define SERIAL_FIFO_TX_SIZE 32
+#define SERIAL_FIFO_RX_SIZE 32
+
+NRF_SERIAL_QUEUES_DEF(serial_queues, SERIAL_FIFO_TX_SIZE, SERIAL_FIFO_RX_SIZE);
+
+
+#define SERIAL_BUFF_TX_SIZE 1
+#define SERIAL_BUFF_RX_SIZE 1
+
+NRF_SERIAL_BUFFERS_DEF(serial_buffs, SERIAL_BUFF_TX_SIZE, SERIAL_BUFF_RX_SIZE);
+
+NRF_SERIAL_CONFIG_DEF(serial_config, NRF_SERIAL_MODE_IRQ,
+                      &serial_queues, &serial_buffs, NULL, sleep_handler);
+
+
+NRF_SERIAL_UART_DEF(serial_uart, 0);
+
+//uint8_t recvBytes[20] = {0};
+uint8_t recvCnt = 0;
+
+
+void gprsPinInit(void) { 
+    nrf_gpio_cfg_output(GPRS_POWER_ON);
+    //nrf_gpio_cfg_output(GPRS_RESET);
+    //nrf_delay_ms(500);
+    //nrf_gpio_pin_set(GPRS_RESET);
+    nrf_delay_ms(500);
+}
+
+void gprsOn(void) {
+    nrf_gpio_pin_set(GPRS_POWER_ON);
+    nrf_delay_ms(8000);
+}
+
 int main(void)
 {
-    uint32_t err_code;
+    ret_code_t ret;
+    uint8_t recvBytes[20] = {0};
 
-    //bsp_board_init(BSP_INIT_LEDS);
+    gprsPinInit();
+    
 
-    nrf_gpio_cfg_output(GPRS_POWER_ON);
-    nrf_gpio_cfg_output(GPRS_RESET);
-    nrf_delay_ms(500);
-    nrf_gpio_pin_clear(GPRS_RESET);
-    nrf_delay_ms(500);
-    nrf_gpio_pin_set(GPRS_RESET);
-    nrf_delay_ms(500);
+    ret = nrf_drv_clock_init();
+    APP_ERROR_CHECK(ret);
+    ret = nrf_drv_power_init(NULL);
+    APP_ERROR_CHECK(ret);
 
-    const app_uart_comm_params_t comm_params =
-      {
-          GPRS_RXD,
-          GPRS_TXD,
-          0,
-          0,
-          APP_UART_FLOW_CONTROL_DISABLED,
-          false,
-          NRF_UART_BAUDRATE_9600
-      };
+    nrf_drv_clock_lfclk_request(NULL);
+    ret = app_timer_init();
+    APP_ERROR_CHECK(ret);
 
-    APP_UART_FIFO_INIT(&comm_params,
-                         UART_RX_BUF_SIZE,
-                         UART_TX_BUF_SIZE,
-                         uart_error_handle,
-                         APP_IRQ_PRIORITY_LOWEST,
-                         err_code);
+    // Initialize LEDs and buttons.
+    //bsp_board_init(BSP_INIT_LEDS | BSP_INIT_BUTTONS);
 
-    APP_ERROR_CHECK(err_code);
+    gprsOn();
+
+    ret = nrf_serial_init(&serial_uart, &m_uart0_drv_config, &serial_config);
+    APP_ERROR_CHECK(ret);
+
+   
+
+    static char tx_message[] = "ATI\n\r";
+
+   
+    APP_ERROR_CHECK(ret);
 
     nrf_gpio_pin_set(GPRS_POWER_ON);
     nrf_delay_ms(8000);
 
+    ret = nrf_serial_write(&serial_uart,
+                           tx_message,
+                           strlen(tx_message),
+                           NULL,
+                           NRF_SERIAL_MAX_TIMEOUT);
+    
+    nrf_delay_ms(200);
 
-    app_uart_put('A');
-    app_uart_put('T');
-    app_uart_put('\r');
-    app_uart_put('\n');
-    recvCnt = 0;
-    app_uart_put('A');
-    app_uart_put('T');
-    app_uart_put('I');
-    app_uart_put('\r');
-    app_uart_put('\n');
-    recvCnt = 0;
+    nrf_serial_read(&serial_uart,
+                    recvBytes,   
+                    30,
+                    NULL,
+                    500);
+
+
+
 }
 
-
 /** @} */
-
